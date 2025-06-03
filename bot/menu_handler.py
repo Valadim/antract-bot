@@ -6,14 +6,15 @@ from aiogram.fsm.state import State, StatesGroup
 from datetime import datetime, timedelta
 from aiogram.utils.keyboard import InlineKeyboardBuilder
 
-from services.sheets import get_menu_by_type
-from bot import dp  # <-- импортируем dp отсюда
+from services.sheets import get_menu_by_type, save_order, get_user_by_id
+from bot import dp
 
 
 class MenuOrder(StatesGroup):
     select_date = State()
     select_meal = State()
-    show_dishes = State()
+    select_dishes = State()
+    comment = State()
 
 
 def get_date_keyboard():
@@ -66,15 +67,63 @@ async def select_meal(callback: CallbackQuery, state: FSMContext):
         await state.clear()
         return
 
-    text = f"📋 <b>Меню на {meal.lower()} {date}:</b>\n\n"
+    builder = InlineKeyboardBuilder()
     for dish in dishes:
-        text += f"• {dish['Название блюда']} — {dish['Цена']} ₽\n"
+        builder.button(
+            text=f"{dish['Название блюда']} ({dish['Цена']}₽)",
+            callback_data=f"dish:{dish['Название блюда']}"
+        )
+    builder.button(text="✅ Готово", callback_data="done")
+    builder.adjust(1)
 
-    await callback.message.edit_text(text)
+    await state.update_data(selected_dishes=[])
+    await callback.message.edit_text("🍽 Выберите блюда:", reply_markup=builder.as_markup())
+    await state.set_state(MenuOrder.select_dishes)
+
+
+@dp.callback_query(F.data.startswith("dish:"))
+async def select_dish(callback: CallbackQuery, state: FSMContext):
+    dish = callback.data.split(":", 1)[1]
+    data = await state.get_data()
+    selected = data.get("selected_dishes", [])
+    if dish not in selected:
+        selected.append(dish)
+        await state.update_data(selected_dishes=selected)
+    await callback.answer(f"Добавлено: {dish}")
+
+
+@dp.callback_query(F.data == "done")
+async def done_selecting(callback: CallbackQuery, state: FSMContext):
+    data = await state.get_data()
+    if not data.get("selected_dishes"):
+        await callback.answer("⚠️ Выберите хотя бы одно блюдо.", show_alert=True)
+        return
+    await callback.message.edit_text("✍️ Есть ли комментарий к заказу? (Напишите или отправьте «-»)")
+    await state.set_state(MenuOrder.comment)
+
+
+@dp.message(MenuOrder.comment)
+async def receive_comment(message: types.Message, state: FSMContext):
+    comment = message.text.strip()
+    data = await state.get_data()
+    user = get_user_by_id(message.from_user.id)
+
+    now = datetime.now()
+    save_order([
+        now.strftime("%d.%m.%Y"),         # дата заказа
+        data["date"],                     # дата доставки
+        user.get("ФИО", "—"),
+        user.get("Телефон", "—"),
+        user.get("Компания", "—"),
+        data["meal"],
+        ", ".join(data["selected_dishes"]),
+        comment if comment != "-" else "",
+        now.strftime("%H:%M")
+    ])
+
+    await message.answer("✅ Ваш заказ принят и записан.")
     await state.clear()
 
 
-# 👇 функция для регистрации (чтобы импортировать в main.py)
 def register_handlers():
-    # всё уже зарегистрировано через декораторы — просто заглушка
     pass
